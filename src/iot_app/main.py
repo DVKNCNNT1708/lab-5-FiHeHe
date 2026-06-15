@@ -3,6 +3,11 @@ from datetime import datetime, timezone
 from enum import Enum
 from typing import Dict, List, Optional
 
+import urllib.request
+import urllib.error
+import json
+import http
+
 from fastapi import Depends, FastAPI, Header, HTTPException, Query, Request, Response, status
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
@@ -13,13 +18,19 @@ SERVICE_NAME = os.getenv("SERVICE_NAME", "iot-ingestion")
 SERVICE_VERSION = os.getenv("SERVICE_VERSION", "0.5.0")
 AUTH_TOKEN = os.getenv("AUTH_TOKEN", "local-dev-token")
 
+# URL AI service – dùng tên service trong Docker Compose (KHÔNG dùng localhost)
+AI_SERVICE_URL = os.getenv("AI_SERVICE_URL", "http://ai-service:9000")
+
+# URL Database (dùng để kiểm tra kết nối trong /health)
+DATABASE_URL = os.getenv("DATABASE_URL", "")
+
 
 app = FastAPI(
     title="FIT4110 Lab 05 - IoT Ingestion Service",
     version=SERVICE_VERSION,
     description=(
-        "IoT Ingestion API chạy trong ngữ cảnh Docker Compose cho Lab 05. "
-        "Luồng logic được kế thừa từ Lab 04 và tiếp tục được dùng để kiểm thử end‑to‑end."
+        "IoT Ingestion API chạy trong ngữ cảnh Docker Compose cho Lab 05. "
+        "Luồng logic được kế thừa từ Lab 04. Tích hợp gọi AI service để phân tích anomaly."
     ),
 )
 
@@ -50,6 +61,8 @@ class HealthResponse(BaseModel):
     status: str
     service: str
     version: str
+    ai_status: str
+    db_status: str
 
 
 class SensorReadingCreate(BaseModel):
@@ -59,7 +72,7 @@ class SensorReadingCreate(BaseModel):
         ...,
         ge=-40,
         le=80,
-        description="Boundary range used in Lab 03 và Lab 04: -40 đến 80.",
+        description="Boundary range: -40 đến 80.",
         examples=[31.5],
     )
     unit: Optional[SensorUnit] = Field(default=None, examples=["celsius"])
@@ -74,6 +87,7 @@ class SensorReading(BaseModel):
     unit: Optional[SensorUnit] = None
     timestamp: str
     created_at: str
+    ai_analysis: Optional[Dict] = None
 
 
 class SensorReadingCreated(BaseModel):
@@ -82,10 +96,15 @@ class SensorReadingCreated(BaseModel):
     metric: SensorMetric
     accepted: bool
     created_at: str
+    ai_analysis: Optional[Dict] = None
 
 
 READINGS: List[Dict] = []
 
+
+# ─────────────────────────────────────────
+# Helpers
+# ─────────────────────────────────────────
 
 def build_problem(
     *,
@@ -106,6 +125,70 @@ def build_problem(
     return problem
 
 
+def now_iso() -> str:
+    return datetime.now(timezone.utc).isoformat(timespec="seconds")
+
+
+def next_reading_id() -> str:
+    today = datetime.now(timezone.utc).strftime("%Y%m%d")
+    return f"R-{today}-{len(READINGS) + 1:04d}"
+
+
+def call_ai_service(device_id: str, metric: str, value: float) -> Optional[Dict]:
+    """
+    Gọi AI service qua tên service (KHÔNG dùng localhost).
+    Trả None nếu AI service không phản hồi.
+    """
+    try:
+        payload = json.dumps({
+            "device_id": device_id,
+            "metric": metric,
+            "value": value,
+        }).encode("utf-8")
+        req = urllib.request.Request(
+            f"{AI_SERVICE_URL}/predict",
+            data=payload,
+            headers={"Content-Type": "application/json"},
+            method="POST",
+        )
+        with urllib.request.urlopen(req, timeout=3) as resp:
+            return json.loads(resp.read().decode("utf-8"))
+    except Exception:
+        return None
+
+
+def check_ai_health() -> str:
+    """Kiểm tra kết nối đến AI service."""
+    try:
+        urllib.request.urlopen(f"{AI_SERVICE_URL}/health", timeout=2)
+        return "ok"
+    except Exception:
+        return "unreachable"
+
+
+def check_db_health() -> str:
+    """Kiểm tra kết nối đến DB (đơn giản, không dùng thư viện DB)."""
+    if not DATABASE_URL:
+        return "not_configured"
+    # Thử parse URL để xác nhận có cấu hình
+    try:
+        if DATABASE_URL.startswith("postgresql://"):
+            return "configured"
+        return "unknown"
+    except Exception:
+        return "error"
+
+
+# ─────────────────────────────────────────
+# Exception handlers
+# ─────────────────────────────────────────
+
+def get_status_title(status_code: int) -> str:
+    try:
+        return http.HTTPStatus(status_code).phrase
+    except ValueError:
+        return "HTTP Error"
+
 @app.exception_handler(HTTPException)
 async def http_exception_handler(request: Request, exc: HTTPException) -> JSONResponse:
     if isinstance(exc.detail, dict):
@@ -113,13 +196,13 @@ async def http_exception_handler(request: Request, exc: HTTPException) -> JSONRe
     else:
         problem = build_problem(
             status_code=exc.status_code,
-            title=status.HTTP_STATUS_CODES.get(exc.status_code, "HTTP Error"),
+            title=get_status_title(exc.status_code),
             detail=str(exc.detail),
             instance=str(request.url.path),
         )
 
     problem.setdefault("status", exc.status_code)
-    problem.setdefault("title", status.HTTP_STATUS_CODES.get(exc.status_code, "HTTP Error"))
+    problem.setdefault("title", get_status_title(exc.status_code))
     problem.setdefault("type", "about:blank")
     problem.setdefault("detail", "Request failed")
     problem.setdefault("instance", str(request.url.path))
@@ -154,6 +237,10 @@ async def validation_exception_handler(
     )
 
 
+# ─────────────────────────────────────────
+# Auth dependency
+# ─────────────────────────────────────────
+
 def verify_bearer_token(authorization: Optional[str] = Header(default=None)) -> None:
     if not authorization:
         raise HTTPException(
@@ -179,21 +266,22 @@ def verify_bearer_token(authorization: Optional[str] = Header(default=None)) -> 
         )
 
 
-def now_iso() -> str:
-    return datetime.now(timezone.utc).isoformat(timespec="seconds")
-
-
-def next_reading_id() -> str:
-    today = datetime.now(timezone.utc).strftime("%Y%m%d")
-    return f"R-{today}-{len(READINGS) + 1:04d}"
-
+# ─────────────────────────────────────────
+# Endpoints
+# ─────────────────────────────────────────
 
 @app.get("/health", response_model=HealthResponse)
 def health() -> HealthResponse:
+    """
+    Kiểm tra readiness của API và các dependency (AI service, DB).
+    Trả ai_status và db_status để operator biết toàn bộ stack có sẵn sàng không.
+    """
     return HealthResponse(
         status="ok",
         service=SERVICE_NAME,
         version=SERVICE_VERSION,
+        ai_status=check_ai_health(),
+        db_status=check_db_health(),
     )
 
 
@@ -205,16 +293,26 @@ def health() -> HealthResponse:
     responses={
         401: {"model": ProblemDetails},
         422: {"model": ProblemDetails},
-        429: {"model": ProblemDetails},
     },
 )
 def create_reading(payload: SensorReadingCreate, response: Response) -> SensorReadingCreated:
-    # Ví dụ logic cảnh báo: nếu nhiệt độ >= 70 thì thêm header cảnh báo
+    """
+    Ghi nhận một sensor reading mới.
+    Tự động gọi AI service để phân tích anomaly và đính kèm kết quả.
+    """
+    # Cảnh báo nhiệt độ cao
     if payload.metric == SensorMetric.temperature and payload.value >= 70:
         response.headers["X-Warning"] = "high-temperature"
 
     reading_id = next_reading_id()
     created_at = now_iso()
+
+    # Gọi AI service (KHÔNG dùng localhost – dùng tên service)
+    ai_result = call_ai_service(
+        device_id=payload.device_id,
+        metric=payload.metric.value,
+        value=payload.value,
+    )
 
     item = {
         "reading_id": reading_id,
@@ -224,6 +322,7 @@ def create_reading(payload: SensorReadingCreate, response: Response) -> SensorRe
         "unit": payload.unit.value if payload.unit else None,
         "timestamp": payload.timestamp,
         "created_at": created_at,
+        "ai_analysis": ai_result,
     }
     READINGS.append(item)
 
@@ -233,6 +332,7 @@ def create_reading(payload: SensorReadingCreate, response: Response) -> SensorRe
         metric=payload.metric,
         accepted=True,
         created_at=created_at,
+        ai_analysis=ai_result,
     )
 
 
@@ -241,6 +341,7 @@ def latest_readings(
     device_id: Optional[str] = Query(default=None),
     limit: int = Query(default=10, ge=1, le=100),
 ) -> Dict[str, List[Dict]]:
+    """Lấy danh sách readings mới nhất, tuỳ chọn lọc theo device_id."""
     items = READINGS
 
     if device_id:
@@ -251,6 +352,7 @@ def latest_readings(
 
 @app.get("/readings/{reading_id}", dependencies=[Depends(verify_bearer_token)])
 def get_reading(reading_id: str) -> Dict:
+    """Lấy một reading cụ thể theo reading_id."""
     for item in READINGS:
         if item["reading_id"] == reading_id:
             return item

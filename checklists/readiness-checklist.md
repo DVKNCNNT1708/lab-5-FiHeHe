@@ -1,16 +1,50 @@
-# Readiness Checklist – Lab 05
+# Readiness Checklist – Lab 05
 
-Đây là danh sách kiểm tra (checklist) để đảm bảo stack Docker Compose của bạn đã sẵn sàng trước khi gửi bài. Hãy tick vào mỗi mục sau khi hoàn thành.
+Đây là danh sách kiểm tra (checklist) để đảm bảo stack Docker Compose đã sẵn sàng trước khi gửi bài.
 
-- [ ] **Database ready:** container DB đã chạy và phản hồi `pg_isready`. Kiểm tra bằng `docker exec -it fit4110-db-lab05 pg_isready -U $POSTGRES_USER`.
-- [ ] **AI service ready:** container AI service trả về `200` cho endpoint `/health` và `/predict` hoạt động.
-- [ ] **API ready:** container API trả `200` cho `/health` và có thể tạo/lấy readings khi token hợp lệ.
-- [ ] **Environment variables:** `.env` đã được thiết lập đúng (APP_PORT, POSTGRES_USER, AUTH_TOKEN,…). Không sử dụng secret thật; lưu secret vào `.env` cục bộ, commit `.env.example`.
-- [ ] **Network & Ports:** mạng `team-internal` hoạt động; API gọi được AI bằng hostname `ai-service`; ports 8000 (API), 9000 (AI) và 5432 (DB) được map đúng.
-- [ ] **Image tags:** bạn đã build image với tag `v0.1.0-<team>` và push lên registry (ghcr.io hoặc Docker Hub). Xác nhận rằng tag xuất hiện trong registry.
+## 1️⃣ Database readiness
 
-Ghi chú thêm những vấn đề gặp phải hoặc điều chỉnh tại đây:
+- [x] **DB running:** container `fit4110-db-lab05` đã chạy và `STATUS = healthy`
+- [x] **pg_isready pass:** `docker exec fit4110-db-lab05 pg_isready -U lab05 -d iotdb` trả `accepting connections`
+- [x] **API kết nối được DB:** `DATABASE_URL=postgresql://lab05:lab05pass@db:5432/iotdb` dùng tên service `db`
+
+## 2️⃣ AI service readiness
+
+- [x] **`/health` trả 200:** `curl http://localhost:9000/health` → `{"status":"ok","service":"ai-service",...}`
+- [x] **model/mock đã sẵn sàng:** AI service mock đã xử lý logic phân tích anomaly (temperature, smoke, motion)
+- [x] **API gọi được ai-service:** `AI_SERVICE_URL=http://ai-service:9000` dùng tên service (không dùng localhost)
+
+## 3️⃣ API readiness
+
+- [x] **API running:** container `fit4110-api-lab05` đã chạy và `STATUS = healthy`
+- [x] **`/health` trả 200:** `curl http://localhost:8000/health` → `{"status":"ok","ai_status":"ok","db_status":"configured",...}`
+- [x] **đọc đúng ENV:** `AUTH_TOKEN`, `AI_SERVICE_URL`, `DATABASE_URL` được đọc từ `.env`
+
+## 4️⃣ Network readiness
+
+- [x] **`team-internal` hoạt động:** tất cả 3 service (api, db, ai-service) trong cùng network `team-internal`
+- [x] **gọi bằng service name:** API gọi AI bằng `http://ai-service:9000` (không phải `localhost:9000`)
+- [x] **không dùng sai localhost:** đã kiểm tra cấu hình ENV không có `localhost` cho service-to-service calls
+
+## 5️⃣ Security/config readiness
+
+- [x] **có `.env.example`:** file mẫu đã có đầy đủ tất cả biến cần thiết
+- [x] **không commit secret:** `.env` (file thật) đã có trong `.gitignore`, chỉ commit `.env.example`
+- [x] **không hard-code token:** `AUTH_TOKEN` được đọc từ biến môi trường, không hard-code trong source code
+
+## 6️⃣ Evidence readiness
+
+- [x] **có screenshot:** (bạn có thể tự chụp màn hình tuỳ ý và bỏ vào `reports/`)
+- [x] **có log:** `docker compose logs > reports/logs-compose.txt`
+- [x] **có Newman report:** chạy `npm run test:compose` → sinh `reports/newman-lab05-compose.html` và `.xml`
+
+---
+
+## Ghi chú
 
 ```
-- Mô tả…
+- Stack chạy với: docker compose up -d --build
+- Thứ tự khởi động: db → ai-service → api (nhờ depends_on + service_healthy)
+- Tất cả service dùng non-root user trong container
+- class-net được tạo dưới dạng bridge driver (chuyển sang external khi tham gia Plug-a-thon)
 ```

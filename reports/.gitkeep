@@ -1,0 +1,6 @@
+# reports directory – evidence cho Lab 05
+# Thư mục này lưu trữ bằng chứng sau khi chạy stack và Newman test:
+#   - newman-lab05-compose.html  (Newman HTML report)
+#   - newman-lab05-compose.xml   (Newman JUnit XML report)
+#   - logs-compose.txt           (docker compose logs output)
+#   - screenshots/               (ảnh chụp /health, docker compose ps)

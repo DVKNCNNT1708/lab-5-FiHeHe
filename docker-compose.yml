@@ -1,14 +1,20 @@
-version: "3.8"
+version: "3.9"
 
 services:
-  # Service API FastAPI
+  # ─────────────────────────────────────────────────────────
+  # Service API FastAPI (IoT Ingestion)
+  # ─────────────────────────────────────────────────────────
   api:
     build:
       context: .
       dockerfile: Dockerfile
     container_name: fit4110-api-lab05
+    image: fit4110/iot-ingestion:v0.1.0-lab05
     env_file:
       - .env
+    environment:
+      - AI_SERVICE_URL=http://ai-service:9000
+      - DATABASE_URL=postgresql://${POSTGRES_USER:-lab05}:${POSTGRES_PASSWORD:-lab05pass}@db:5432/${POSTGRES_DB:-iotdb}
     depends_on:
       db:
         condition: service_healthy
@@ -20,13 +26,16 @@ services:
     ports:
       - "${APP_PORT:-8000}:8000"
     healthcheck:
-      test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/health', timeout=3).read()"]
       interval: 30s
       timeout: 5s
       retries: 3
-      start_period: 10s
+      start_period: 15s
+    restart: unless-stopped
 
+  # ─────────────────────────────────────────────────────────
   # PostgreSQL database service
+  # ─────────────────────────────────────────────────────────
   db:
     image: postgres:15-alpine
     container_name: fit4110-db-lab05
@@ -39,33 +48,54 @@ services:
     networks:
       - team-internal
     healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-lab05}"]
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-lab05} -d ${POSTGRES_DB:-iotdb}"]
       interval: 10s
       timeout: 5s
       retries: 5
+      start_period: 10s
+    restart: unless-stopped
 
-  # AI service mẫu dùng Python HTTP server hoặc FastAPI
+  # ─────────────────────────────────────────────────────────
+  # AI service (Mock AI – có thể thay bằng YOLOv8/MediaPipe)
+  # ─────────────────────────────────────────────────────────
   ai-service:
-    image: python:3.11-slim
+    build:
+      context: .
+      dockerfile: Dockerfile.ai
     container_name: fit4110-ai-lab05
-    working_dir: /service
-    volumes:
-      - ./src/ai_service:/service
-    command: ["python", "main.py"]
+    image: fit4110/ai-service:v0.1.0-lab05
+    environment:
+      - AI_SERVICE_NAME=ai-service
+      - AI_SERVICE_VERSION=0.1.0
     networks:
       - team-internal
+    ports:
+      - "9000:9000"
     healthcheck:
-      test: ["CMD-SHELL", "python -c \"import requests; import sys; sys.exit(0) if requests.get('http://localhost:9000/health').status_code == 200 else sys.exit(1)\""]
-      interval: 30s
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:9000/health', timeout=3).read()"]
+      interval: 15s
       timeout: 5s
       retries: 3
-      start_period: 10s
+      start_period: 15s
+    restart: unless-stopped
 
+# ─────────────────────────────────────────────────────────
+# Networks
+# ─────────────────────────────────────────────────────────
 networks:
+  # Mạng nội bộ của nhóm – các service giao tiếp qua tên service
   team-internal:
     driver: bridge
-  class-net:
-    external: true
 
+  # Mạng chung cho Plug-a-thon Buổi 6 – tạo thủ công khi cần
+  # Khi chạy standalone: để là bridge
+  # Khi tham gia Plug-a-thon: đổi thành external: true
+  class-net:
+    driver: bridge
+
+# ─────────────────────────────────────────────────────────
+# Volumes
+# ─────────────────────────────────────────────────────────
 volumes:
   db-data:
+    driver: local
